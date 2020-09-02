@@ -10,6 +10,7 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 
 #define BIT_8 8
 #define BIT_9 9
@@ -163,28 +164,21 @@ static int gpio_read_bit(unsigned int gpio_addr,int pin)
 	return !!(gpio_read & (1 << pin)) ;
 }
 
-static int hw_version_read(char *page,char **start, off_t off, int count, int *eof, void *data)
-{
-    char *p = page;
-    int size = 0;
-    if (off != 0)
-        goto end;
-
-	p += sprintf(p, "%d %d",g_hw_version_prefix, g_hw_version_postfix);
-    p += sprintf(p,"\n");
-
-end:
-    size = (p - page);
-    if (size <= off + count)
-    	*eof = 1;
-    *start = page + off;
-    size -= off;
-    if (size > count)
-    	size = count;
-    if (size < 0)
-    	size = 0;
-    return size;
+static int hw_version_proc_show(struct seq_file *m, void *v) {
+	seq_printf(m, "%d %d", g_hw_version_prefix, g_hw_version_postfix);
+	return 0;
 }
+
+static int hw_version_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, hw_version_proc_show, NULL);
+}
+
+static struct file_operations hw_version_proc_fops = {
+	.open		= hw_version_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
 
 static int __init lpc_bridge_init(void)
 {
@@ -296,7 +290,8 @@ static int __init lpc_bridge_init(void)
     //
     //	printk("BIT28:BIT32:BIT33:BIT34 = %d:%d:%d:%d\n",	gpio_read_bit(gpio_base,BIT_28),gpio_read_bit(gpio_base,BIT_32),gpio_read_bit(gpio_base,BIT_33),gpio_read_bit(gpio_base,BIT_34));
 
-    create_proc_read_entry(QNAP_PROC_HW_VERSION, 0,NULL, hw_version_read,(void *)0);
+    struct proc_dir_entry *entry;
+    entry = proc_create(QNAP_PROC_HW_VERSION, 0, NULL, &hw_version_proc_fops);
     return 0;
 }
 
