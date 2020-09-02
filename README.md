@@ -6,11 +6,9 @@ This is linux kernel v3.12.6 sources for QNap TS-509 and TS-809.
 Source is also provided by QNap's sourceforge page at https://sourceforge.net/projects/qosgpl/ but it's incomplete and broken.
 QNap's kernels are patched versions of stock kernels with support for QNap's hardware and software (frontend).
 
+### Remarks
 This *fork* of qnap's kernel has been modified and *fixed* to build properly.
 At the moment it is untested on a real device. There's not even a guarantee that it will boot.
-
-### Warning
-So far, this is unpatched version. Patches are coming soon.
 
 ### Build instructions
 
