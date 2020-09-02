@@ -22,7 +22,7 @@ Linux kernel v3.12.6 is not compilable with modern versions of GCC. I found a fo
  - Install gcc-multilib-4.7 available from this repository's tools branch. It depends on another available package there: cloog-git. Install that one also.
  - Make symbolic links at /usr/bin for all existing gcc's binary's. For example: ln -s /usr/bin/gcc-4.7 /usr/bin/gcc
  - Get source of kernel from this branch
- - Select kernel config template from qnap_configs directory by copying it to .config at kernel's root directory.
+ - Select kernel config template from kernel_cfg directory by copying it to .config at kernel's root directory.
  - Make necessary changes to configuration (make menuconfig)
  - Build the kernel
  - Test kernel first on the virtual machine to see if it even boots..
