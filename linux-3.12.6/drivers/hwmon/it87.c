@@ -64,12 +64,20 @@
 #include <linux/acpi.h>
 #include <linux/io.h>
 
+#include <qnap/pic.h>
+
 #define DRVNAME "it87"
 #ifdef CONFIG_MACH_QNAPTS
 //Patch by QNAP: fix gpio
 //Patch by QNAP: add x59 derivative model
 static int is_it8721_chip = 0;
 static unsigned short gpio_addr;
+#endif
+
+#ifdef CONFIG_TS509
+#define TS509
+#elif CONFIG_TS809
+#define TS809
 #endif
 
 enum chips { it87, it8712, it8716, it8718, it8720, it8721, it8728, it8771,
@@ -413,6 +421,11 @@ struct it87_data {
 	struct mutex update_lock;
 	char valid;		/* !=0 if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
+
+	// QNAP
+	int power_button_action;
+	int power_button_status;
+	struct work_struct power_button_work;
 
 	u16 in_scaled;		/* Internal voltage sensors are scaled */
 	u8 in[9][3];		/* [nr][0]=in, [1]=min, [2]=max */
@@ -2082,6 +2095,9 @@ static void it87_remove_files(struct device *dev)
 	sysfs_remove_group(&dev->kobj, &it87_group_label);
 }
 
+//Patch by QNAP
+static void power_button_func(struct work_struct *work);
+
 static int it87_probe(struct platform_device *pdev)
 {
 	struct it87_data *data;
@@ -2507,7 +2523,9 @@ static void it87_init_device(struct platform_device *pdev)
 #ifdef CONFIG_MACH_QNAPTS
     for (i = 0; i < 3; i++) {
         u8 val;
-#if defined (TS809) || defined (TS809U)
+#if defined (TS509)
+	val = 0x64;
+#elif defined (TS809) || defined (TS809U)
         val= 0x46;
 #else
         val= 0x64;
@@ -3149,6 +3167,297 @@ static void __exit sm_it87_exit(void)
 	platform_driver_unregister(&it87_driver);
 }
 
+//Patch for QNap: missing features
+
+extern int get_current_power_lost_mode(void);
+
+unsigned char gpio_read_byte(unsigned char index) {
+	return inb(gpio_addr+index);
+}
+
+void gpio_write_byte(unsigned char index, unsigned char data) {
+	outb(data, gpio_addr+index);
+}
+
+int set_hd_error_led_on(int disk_num, int enable) {
+	int tmp;
+	switch (disk_num) {
+#if defined (TS509) || defined (TS809) || defined (TS809U)
+	case HDD1:
+		tmp = gpio_read_byte(GPIO_SET3);
+		gpio_write_byte(GPIO_SET3, enable ? (tmp & 0xfe) : (tmp | 0x01));
+		break;
+	case HDD2:
+		tmp = gpio_read_byte(GPIO_SET3);
+		gpio_write_byte(GPIO_SET3, enable ? (tmp & 0xfd) : (tmp | 0x02));
+		break;
+	case HDD3:
+		tmp = gpio_read_byte(GPIO_SET3);
+		gpio_write_byte(GPIO_SET3, enable ? (tmp & 0xfb) : (tmp | 0x04));
+		break;
+	case HDD4:
+		tmp = gpio_read_byte(GPIO_SET3);
+		gpio_write_byte(GPIO_SET3, enable ? (tmp & 0xdf) : (tmp | 0x20));
+		break;
+	case HDD5:
+		tmp = gpio_read_byte(GPIO_SET1);
+		gpio_write_byte(GPIO_SET1, enable ? (tmp & 0xfe) : (tmp | 0x01));
+		break;
+#if defined (TS809) || defined (TS809U)
+	case HDD6:
+		tmp = gpio_read_byte(GPIO_SET3);
+		gpio_write_byte(GPIO_SET3, enable ? (tmp & 0xf7) : (tmp | 0x08));
+		break;
+	case HDD7:
+		tmp = gpio_read_byte(GPIO_SET4);
+		gpio_write_byte(GPIO_SET4, enable ? (tmp & 0xbf) : (tmp | 0x40));
+		break;
+	case HDD8:
+		tmp = gpio_read_byte(GPIO_SET4);
+		gpio_write_byte(GPIO_SET4, enable ? (tmp & 0x7f) : (tmp | 0x80));
+		break;
+#endif
+#endif
+	}
+	return 0;
+}
+EXPORT_SYMBOL(set_hd_error_led_on);
+
+void enable_green_on(int enable) {
+	int tmp = superio_inb(IT87_GPIO_SET5_ENABLE_REG);
+	superio_outb(IT87_GPIO_SET5_ENABLE_REG, tmp | 0x08);
+	tmp = gpio_read_byte(GPIO_SET5);
+	gpio_write_byte(GPIO_SET5, enable ? (tmp & 0xf7) : (tmp | 0x08));
+}
+
+void enable_green_blink(int enable) {
+	int tmp = superio_inb(IT87_GPIO_SET5_ENABLE_REG);
+	superio_outb(IT87_GPIO_SET5_ENABLE_REG, tmp & 0xf7);
+	superio_outb(IT87_GPIO_LED_BLINK1_MAPPING_REG, 0x2b);
+	superio_outb(IT87_GPIO_LED_BLINK1_CTRL_REG, enable ? 0x00 : 0x01);
+}
+
+void enable_red_on(int enable) {
+	int tmp = superio_inb(IT87_GPIO_SET4_ENABLE_REG);
+	superio_outb(IT87_GPIO_SET4_ENABLE_REG, tmp | 0x02);
+	tmp = gpio_read_byte(GPIO_SET4);
+	gpio_write_byte(GPIO_SET4, enable ? (tmp & 0xfd) : (tmp &0x02));
+}
+
+void enable_red_blink(int enable) {
+	int tmp = superio_inb(IT87_GPIO_SET4_ENABLE_REG);
+	superio_outb(IT87_GPIO_SET4_ENABLE_REG, tmp & 0xfd);
+	superio_outb(IT87_GPIO_LED_BLINK1_MAPPING_REG, 0x21);
+	superio_outb(IT87_GPIO_LED_BLINK1_CTRL_REG, enable ? 0x00 : 0x01);
+}
+
+void enable_usb_led_on(int enable) {
+	int tmp = superio_inb(IT87_GPIO_SET5_ENABLE_REG);
+	superio_outb(IT87_GPIO_SET5_ENABLE_REG, tmp | 0x01);
+	tmp = gpio_read_byte(GPIO_SET5);
+	gpio_write_byte(GPIO_SET5, enable ? (tmp & 0xfe) : (tmp | 0x01));
+}
+
+void enable_usb_led_blink(int enable) {
+	int tmp = superio_inb(IT87_GPIO_SET5_ENABLE_REG);
+	superio_outb(IT87_GPIO_SET5_ENABLE_REG, tmp & 0xfe);
+	superio_outb(IT87_GPIO_LED_BLINK2_MAPPING_REG, 0x28);
+	superio_outb(IT87_GPIO_LED_BLINK2_CTRL_REG, enable ? 0x00 : 0x01);
+}
+
+int set_led_status(u_int cmd) {
+	superio_enter();
+	superio_select(GPIO);
+	switch (cmd) {
+	case QNAP_PIC_STATUS_RED_BLINK:
+		enable_green_on(0);
+		enable_red_blink(1);
+		break;
+	case QNAP_PIC_STATUS_GREEN_BLINK:
+		enable_red_on(0);
+		enable_green_blink(1);
+		break;
+	case QNAP_PIC_STATUS_GREEN_ON:
+		enable_red_on(0);
+		enable_green_on(1);
+		break;
+	case QNAP_PIC_STATUS_RED_ON:
+		enable_green_on(0);
+		enable_red_on(1);
+		break;
+	case QNAP_PIC_STATUS_OFF:
+		enable_green_on(0);
+		enable_red_on(0);
+		break;
+	case QNAP_PIC_USB_LED_ON:
+		enable_usb_led_on(1);
+		break;
+	case QNAP_PIC_USB_LED_BLINK:
+		enable_usb_led_blink(1);
+		break;
+	case QNAP_PIC_USB_LED_OFF:
+		enable_usb_led_on(0);
+		break;
+	}
+	superio_exit();
+	return 0;
+}
+EXPORT_SYMBOL(set_led_status);
+
+int set_power_lost_mode_to_gpio(int mode) {
+	int state1, state2;
+	superio_enter();
+	superio_select(PME);
+	state1 = superio_inb(IT87_APC_PME_CORL_REG1);
+	state2 = superio_inb(IT87_APC_PME_CORL_REG2);
+	switch (mode) {
+	case QNAP_PIC_POWER_LOSS_POWER_ON:
+		superio_outb(IT87_APC_PME_CORL_REG1, state1 & 0xdf); // set BIT5 to 0
+		superio_outb(IT87_APC_PME_CORL_REG2, state2 | 0x20); // set BIT5 to 1
+		break;
+	case QNAP_PIC_POWER_LOSS_POWER_OFF:
+		superio_outb(IT87_APC_PME_CORL_REG1, state1 & 0xdf); // set BIT5 to 0
+		superio_outb(IT87_APC_PME_CORL_REG2, state2 & 0xdf); // set BIT5 to 0
+		break;
+	case QNAP_PIC_POWER_LOSS_LAST_STATE:
+		superio_outb(IT87_APC_PME_CORL_REG1, state1 | 0x20);
+		superio_outb(IT87_APC_PME_CORL_REG2, state2 & 0xdf); // set BIT5 to 1
+		break;
+	}
+	// For debugging
+	/*
+	state1 = superio_inb(IT87_APC_PME_CORL_REG1);
+	printk("0x2f = %x\n", state1 & 0x20);
+	state2 = superio_inb(IT87_APC_PME_CORL_REG2);
+	printk("0x4f = %x\n", state2 & 0x20);
+	*/
+	superio_exit();
+	return 0;
+}
+EXPORT_SYMBOL(set_power_lost_mode_to_gpio);
+
+static unsigned int qnap_pwb_gpio_base;
+void set_pwb_gpio(void);
+void reset_pwb_gpio(void);
+int get_pwb_gpio(void);
+
+static void power_button_func(struct work_struct *work) {
+	struct it87_data *data = NULL;
+	unsigned char state, state1, state2;
+	data = container_of(work, struct it87_data, power_button_work);
+	mutex_lock(&data -> update_lock);
+	switch(data -> power_button_action) {
+	case 1: //set pwb to gpio input
+		superio_enter();
+		superio_select(GPIO); // LDN = 7
+		state1 = superio_inb(0x28); // Set multi-function pin selection for gpio set 4, bit 3
+		superio_outb(0x28, state1 | 0x08);
+		state1 = superio_inb(0xC3); // Set simple I/O for gpio set 4, bit 3
+		superio_outb(0xC3, state1 | 0x08);
+		state1 = superio_inb(0xCB); // Set input mode for gpio set 4, bit 3
+		superio_outb(0xCB, state1 & ~0x08);
+		state1 = superio_inb(0x62); // Simple I/O base address MSB register
+		state2 = superio_inb(0x63); // Simple I/O base address LSB register
+		qnap_pwb_gpio_base = (state1 << 8) | state2;
+		//data -> power_button_status = (inb(qnap_pwb_gpio_base + 3) & 0x08) ? 1 : 0;
+		superio_exit();
+		//printk(KERN_WARNING "power button func set to pwb %x\n", qnap_pwb_gpio_base);
+		break;
+	case 2: // reset pwb function
+		superio_enter();
+		superio_select(GPIO);
+		state = superio_inb(0x28);
+		superio_outb(0x28, state & ~0x08);
+		superio_exit();
+		//printk(KERN_WARNING "power button func reset pwb\n");
+		break;
+	case 3: // get gpio status
+		data -> power_button_status = (inb(qnap_pwb_gpio_base + 3) & 0x08) ? 1 : 0;
+		//printk(KERN_WARNING "power button func = %x\n", data -> power_button_status);
+		break;
+	default:
+		break;
+	}
+	mutex_unlock(&data -> update_lock);
+}
+
+int get_button_status(void) {
+	return gpio_read_byte(GPIO_SET1);
+}
+EXPORT_SYMBOL(get_button_status);
+
+int get_redundant_power_status(void) {
+	return gpio_read_byte(GPIO_SET2);
+}
+EXPORT_SYMBOL(get_redundant_power_status);
+
+void set_pwb_gpio(void) {
+	struct it87_data *data = NULL;
+	if (pdev == NULL) return;
+	data = platform_get_drvdata(pdev);
+	data -> power_button_action = 1;
+	schedule_work(&data -> power_button_work);
+}
+
+void reset_pwb_gpio(void) {
+	struct it87_data *data = NULL;
+	if (pdev == NULL) return;
+	data = platform_get_drvdata(pdev);
+	data -> power_button_action = 2;
+	schedule_work(&data -> power_button_work);
+}
+
+// return 1 -> release 0 -> press
+int get_pwb_gpio() {
+#if 0
+	struct it87_data *data = NULL;
+	if (pdev == NULL ) return -1;
+	data = platform_get_drvdata(pdev);
+	data -> power_button_action = 3;
+	schedule_work(&data -> power_button_work);
+
+	printk(KERN_WARNING "get pwb gpio func = %x\n", data -> power_button_status);
+	return data -> power_button_status;
+#else
+	//printk(KERN_WARNING "get pwb gpio func = %x\n", (inb(qnap_pwb_gpio_base + 3) & 0x08) ? 1 : 0);
+	return (inb(qnap_pwb_gpio_base + 3) & 0x08) ? 1 : 0;
+#endif
+}
+
+void set_EUP_state(int enable) {
+	unsigned char state;
+	superio_enter();
+	superio_select(PME);
+	state = superio_inb(0xfa);
+	if (enable) state |= 0x12;
+	else state &= ~0x12;
+	superio_outb(0xfa, state);
+	state = superio_inb(0xfa);
+	superio_exit();
+}
+
+int get_power_state() {
+
+	unsigned char state;
+	superio_enter();
+	superio_select(PME);
+	state = superio_inb(0xfa);
+	superio_exit();
+	state = (state & 0x2) ? 1 : 0;
+	switch(get_current_power_lost_mode()) {
+	case QNAP_PIC_POWER_LOSS_LAST_STATE:
+		state |= 0 << 1; // last state
+		break;
+	case QNAP_PIC_POWER_LOSS_POWER_ON:
+		state |= 1 << 1; // always on
+		break;
+	case QNAP_PIC_POWER_LOSS_POWER_OFF:
+		state |= 2 << 1; // always on?
+		break;
+	}
+	return state;
+}
+EXPORT_SYMBOL(get_power_state);
 
 MODULE_AUTHOR("Chris Gauthron, Jean Delvare <khali@linux-fr.org>");
 MODULE_DESCRIPTION("IT8705F/IT871xF/IT872xF hardware monitoring driver");
