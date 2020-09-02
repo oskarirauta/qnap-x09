@@ -92,6 +92,8 @@
 static struct {		/* this is private data for the iTCO_wdt device */
 	/* TCO version/generation */
 	unsigned int iTCO_version;
+	/* The device's ACPIBASE address (TCOBASE = ACPIBASE + 0x60) */
+	unsigned long ACPIBASE;
 	struct resource *tco_res;
 	struct resource *smi_res;
 	struct resource *gcs_res;
@@ -619,6 +621,8 @@ static int iTCO_wdt_probe(struct platform_device *dev)
 		platform_get_resource(dev, IORESOURCE_IO, ICH_RES_IO_SMI);
 	if (!iTCO_wdt_private.smi_res)
 		goto out;
+
+	iTCO_wdt_private.ACPIBASE = platform_get_resource(dev, IORESOURCE_IO, ICH_RES_IO_TCO) - 0x60;
 
 	iTCO_wdt_private.iTCO_version = ich_info->iTCO_version;
 	iTCO_wdt_private.dev = dev;
