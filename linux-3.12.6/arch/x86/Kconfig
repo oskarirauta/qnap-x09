@@ -284,6 +284,19 @@ config QNAP_PICD
 	tristate "picd"
 	depends on MACH_QNAPTS
 
+choice
+	prompt "QNap model"
+	default TS809
+	depends on MACH_QNAPTS
+
+config TS509
+	bool "QNap TS-509"
+
+config TS809
+	bool "QNap TS-809"
+
+endchoice
+
 config SMP
 	bool "Symmetric multi-processing support"
 	---help---
