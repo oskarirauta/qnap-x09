@@ -70,6 +70,22 @@ EXPORT_SYMBOL(pfn_sys_files_notify);
 #define QNAP_NFSV4_RICHACL    2
 #endif
 
+#ifdef CONFIG_MACH_QNAPTS
+#include <qnap/qfunc.h>
+int recycle_enable = 0;
+extern struct objQueue recycle_queue;
+EXPORT_SYMBOL(recycle_enable);
+
+extern char * get_full_name( const char * oldname );
+extern int is_in_eSATA(char *pathname);
+extern int is_in_usb(char *pathname);
+extern int is_in_share_folder(char *pathname);
+extern int is_in_trash(char *pathname);
+extern int put_to_queue( struct objQueue *q, const char *str, int state);
+extern int is_word_temp(char *pathname);
+
+#endif
+
 /* 
  * QNAP patch: ...without_acl() and ...nfsv4_racl() 
  * #3782 NFSv4 supports Windows ACL via RichACL 
@@ -4345,6 +4361,48 @@ static long do_rmdir(int dfd, const char __user *pathname)
 #ifdef	QNAP_FNOTIFY
 	T_FILE_STATUS  tfsOrg;
 #endif	//QNAP_FNOTIFY
+
+#if defined(CONFIG_MACH_QNAPTS)
+
+	if (recycle_enable != 0) {
+
+		name = user_path_parent(dfd, pathname, &nd, lookup_flags);
+		if (IS_ERR(name)) return PTR_ERR;
+
+		char *full_name;
+		char *str = __getname();
+
+		if (!str) goto on_error;
+
+		strcpy(str, "/share");
+		full_name = get_full_name(name);
+
+		if (IS_ERR(full_name)) goto on_error;
+
+		if (is_in_eSATA(full_name)) goto original_rmdir;
+		else if (is_in_usb(full_name)) goto original_rmdir;
+
+		int ret = is_in_share_folder(full_name);
+		int ret2 = is_in_trash(full_name);
+
+		if (ret2 == 1) goto original_rmdir;
+		else if (ret2 == 2) {
+			strcat(str, name);
+			goto original_rmdir;
+		} else {
+			if (ret == 1) put_to_queue(&recycle_queue, full_name, STAT_DIR);
+			else if (ret == 2) {
+				strcat(str, name);
+				put_to_queue(&recycle_queue, str, STAT_DIR);
+			} else goto original_rmdir;
+		}
+original_rmdir:
+		kfree(full_name);
+on_error:
+		if (str) __putname(str);
+	}
+#endif
+
 retry:
 	name = user_path_parent(dfd, pathname, &nd, lookup_flags);
 	if (IS_ERR(name))
@@ -4512,6 +4570,63 @@ static long do_unlinkat(int dfd, const char __user *pathname)
 	struct nameidata nd;
 	struct inode *inode = NULL;
 	unsigned int lookup_flags = 0;
+
+#if defined(CONFIG_MACH_QNAPTS)
+
+	if (recycle_enable != 0) {
+
+		name = user_path_parent(dfd, pathname, &nd, lookup_flags);
+		if (IS_ERR(name)) return PTR_ERR(name);
+
+		char *full_name;
+		char *str;
+		struct kstat stat;
+
+		str = __getname();
+		if (!str) goto on_error;
+
+		// XXX vfs_lstat: I take userspace address
+		int value = vfs_lstat((char *)pathname, &stat);
+
+		/*
+		Check if
+		 - file's size is zero?
+		 - file is link?
+		 - file is office work template?
+		*/
+		if (stat.size == 0) goto on_error;
+		else if (S_ISLNK(stat.mode)) goto on_error;
+		else if (!is_word_temp((char *)name)) goto on_error;
+
+		full_name = get_full_name(name);
+		if (IS_ERR(full_name)) goto on_error;
+
+		if (is_in_eSATA(full_name)) goto original_unlink;
+		if (is_in_usb(full_name)) goto original_unlink;
+
+		int ret1 = is_in_share_folder(full_name);
+		int ret2 = is_in_trash(full_name);
+
+		if (ret2 == 1) goto original_unlink;
+		else if (ret2 == 2) {
+			strcat(str, name);
+			goto original_unlink;
+		} else {
+			if ( ret1 == 1) put_to_queue(&recycle_queue, full_name, STAT_FILE);
+			else if (ret1 == 2) {
+				strcat(str, name);
+				put_to_queue(&recycle_queue, str, STAT_FILE);
+			} else goto original_unlink;
+		}
+original_unlink:
+		kfree(full_name);
+on_error:
+	if (str) __putname(str);
+
+	}
+
+#endif
+
 retry:
 	name = user_path_parent(dfd, pathname, &nd, lookup_flags);
 	if (IS_ERR(name))
