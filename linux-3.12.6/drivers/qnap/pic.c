@@ -17,6 +17,7 @@
 #include <qnap/qfunc.h>
 #include <qnap/sendmessage.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <qnap/marvell_reg.h>
 
 #include <linux/string.h>
@@ -45,6 +46,9 @@ static int sys_temperature = 0;
 extern void ich_power_on_recovery();
 extern void ich_power_off_recovery();
 extern int get_power_state();
+extern int set_power_lost_mode_to_gpio();
+extern int set_hd_error_led_on();
+extern int get_from_queue(struct objQueue *q, File_Name *s);
 
 struct pci_dev *mv6145dev[4];
 int mv_dev_cnt = 0;
@@ -54,16 +58,28 @@ int mv_dev_cnt = 0;
 /***************************************************************
 	Proc related variable and API
 ****************************************************************/
-static struct proc_dir_entry *ata_time_procdir = NULL;
-static struct proc_dir_entry *ata_retry_procdir = NULL;
-int qnap_ata_reset_to_ms = 0; // unit: ms
-int qnap_ata_retry_val = 0;
-static int ata_reset_timeout_read(char *page, char **start, off_t off,int count, int *eof, void *data);
-static int ata_reset_timeout_write(struct file *file,const char __user *buffer,unsigned long count,void *data);
-static int ata_retry_read(char *page, char **start, off_t off,int count, int *eof, void *data);
-static int ata_retry_write(struct file *file,const char __user *buffer,unsigned long count,void *data);
+static struct proc_dir_entry *ata_time_procdir;
+static struct proc_dir_entry *ata_retry_procdir;
 
+//int qnap_ata_reset_to_ms; // = 0; // unit: ms
+//int qnap_ata_retry_val; // = 0;
 
+extern int qnap_ata_reset_to_ms;
+extern int qnap_ata_retry_val;
+
+//static int ata_reset_timeout_read(char *page, char **start, off_t off,int count, int *eof, void *data);
+//static int ata_reset_timeout_write(struct file *file,const char __user *buffer,unsigned long count,void *data);
+//static int ata_retry_read(char *page, char **start, off_t off,int count, int *eof, void *data);
+//static int ata_retry_write(struct file *file,const char __user *buffer,unsigned long count,void *data);
+
+int qraid1_enable = 0; //used in namei.c & read_write.c
+EXPORT_SYMBOL(qraid1_enable);
+
+#if defined(CONFIG_TS509)
+#define TS509
+#elif defined(CONFIG_TS809)
+#define TS809
+#endif
 
 #if defined (TS809) || defined (TS809U) || defined (TS509)
 #define x86_LAKEPORT
@@ -71,12 +87,12 @@ static int ata_retry_write(struct file *file,const char __user *buffer,unsigned 
 #define x86_ATOM
 #endif
 
-#if defined(TS509) || defined(TS559) || defined(TS569)
+#if defined(TS559) || defined(TS569)
 #define SUPPORT_5_DISKS
 #elif defined(TS639) || defined(TS659) || defined(TS669)
 #define SUPPORT_5_DISKS
 #define SUPPORT_6_DISKS
-#elif defined(TS809) || defined(TS809U) || defined(TS839) || defined(SS839) || defined(TS859) || defined(TS859U) || defined(TS869) || defined(TS869U)
+#elif defined(TS509) || defined(TS809) || defined(TS809U) || defined(TS839) || defined(SS839) || defined(TS859) || defined(TS859U) || defined(TS869) || defined(TS869U)
 #define SUPPORT_5_DISKS
 #define SUPPORT_6_DISKS
 #define SUPPORT_8_DISKS
@@ -300,7 +316,7 @@ static int set_power_lost_mode(int mode)
     WriteToCmos(POWERSTATE, state);   
     return set_power_lost_mode_to_gpio(mode);
 }
-
+EXPORT_SYMBOL(set_power_lost_mode);
 
 #elif defined(x86_LAKEPORT) || defined(x86_ATOM) || defined(X86_PINEVIEW) || defined(X86_CEDAVIEW)
 static int ReadFromCmos(int addr)
@@ -328,6 +344,8 @@ int get_current_power_lost_mode()
         mode = QNAP_PIC_POWER_LOSS_LAST_STATE;
     return mode;
 }
+EXPORT_SYMBOL(get_current_power_lost_mode);
+
 static int set_power_lost_mode(int mode)
 {
     int state;
@@ -386,6 +404,8 @@ static int set_power_lost_mode(int mode)
     }
     return 0;
 }
+EXPORT_SYMBOL(set_power_lost_mode);
+
 #endif
 
 int qnap_pic_send_command(unsigned short *data, int count)
@@ -594,8 +614,8 @@ static long pic_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case IOCTL_MSG_GET_MESSAGE:
 		while (rx_begin == rx_end) {
 			interruptible_sleep_on(&pic_wait);
-			if (signal_pending(current)){
-printk("pic_ioctl: signal_pending current failed\n");
+			if (signal_pending(current)) {
+				printk("pic_ioctl: signal_pending current failed\n");
 				return -ERESTARTSYS;
 			}
 		}
@@ -609,8 +629,7 @@ printk("pic_ioctl: signal_pending current failed\n");
 			rx_begin = (rx_begin + 1) % QUEUE_BUFSIZE;
 			
 			// Add for save system temperature
-                	if((qpi.pic_data[i] >= QNAP_PIC_SYS_TEMP_LOW) && (qpi.pic_data[i] <= QNAP_PIC_SYS_TEMP_HIGH))
-                	{
+                	if((qpi.pic_data[i] >= QNAP_PIC_SYS_TEMP_LOW) && (qpi.pic_data[i] <= QNAP_PIC_SYS_TEMP_HIGH)) {
 				sys_temperature = qpi.pic_data[i] - 0x80;
                 	}
 
@@ -637,13 +656,13 @@ printk("pic_ioctl: signal_pending current failed\n");
 	case IOCTL_GPIO_GET_MESSAGE:
 	{
 		int state = 0;
-#if defined (TS809) || defined (TS809U) || defined(TS439) || defined (TS439U) || defined(SS439)
+#if defined (TS809) || defined (TS809U) || defined(CONFIG_TS509) || defined(TS439) || defined (TS439U) || defined(SS439)
 		int button_state = 0;
 		int power_state = 0;
 
 		button_state = get_button_status();
 		power_state = get_redundant_power_status();
-#if defined(TS809) || defined(TS809U)
+#if defined(TS809) || defined(TS809U) || defined(CONFIG_TS509)
 		state |= (power_state >> 2);
 		state |= button_state;
 #elif defined(TS439) || defined (TS439U) || defined(SS439)
@@ -657,7 +676,7 @@ printk("pic_ioctl: signal_pending current failed\n");
 		state = get_button_status();
 #endif	
 
-		if(copy_to_user((void __user *)arg, &state, sizeof(state))){
+		if(copy_to_user((void __user *)arg, &state, sizeof(state))) {
 			return -EFAULT;
                 }
 	}
@@ -680,18 +699,16 @@ printk("pic_ioctl: signal_pending current failed\n");
 
                 //if no file in the recycle_queue
 
-		while( get_from_queue(&recycle_queue, &stat) == 0){
+		while( get_from_queue(&recycle_queue, &stat) == 0) {
 			interruptible_sleep_on(&recycle_queue.recycle_wait);
-			if (signal_pending(current))
-                        {
+			if (signal_pending(current)) {
                                 printk("recycle_ioctl: signal_pending current failed\n");
                                 return -ERESTARTSYS;
                         }
                         //return -EINVAL;
 		}
 
-                if(copy_to_user((void __user *)arg, &stat, sizeof(File_Name)))
-                {	
+                if (copy_to_user((void __user *)arg, &stat, sizeof(File_Name))) {	
                         return -EFAULT;
                 }
 	}
@@ -715,8 +732,7 @@ printk("pic_ioctl: signal_pending current failed\n");
                 while (begin == end) {
                         printk("PIC without any event\n");
                         interruptible_sleep_on(&chfiles_wait);
-                        if (signal_pending(current))
-                        {
+                        if (signal_pending(current)) {
                                 printk("changedfiles_ioctl: signal_pending current failed\n");
                                 return -ERESTARTSYS;
                         }
@@ -772,9 +788,7 @@ static long pic_compat_ioctl(struct file *file, unsigned int cmd, unsigned long 
 	long ret;
  
 	inode = file->f_dentry->d_inode;
- 
-    ret = pic_ioctl(file, cmd, arg);
-    
+	ret = pic_ioctl(file, cmd, arg);    
 	return ret;
 }
 #endif
@@ -827,22 +841,22 @@ static struct miscdevice pic_device = {
     PIC_MINOR, "pic", &pic_fops
 };
 
-static int systemp_read(char *page, char **start, off_t off,
-                   int count, int *eof, void *data)
-{
-	int     len;
-
-        len=sprintf(page, "%d\n", sys_temperature);
-        return len;	
+static int systemp_proc_show(struct seq_file *m, void *v) {
+	seq_printf(m, "%d\n", sys_temperature);
+	return 0;
 }
 
-static int vendor_read(char *page, char **start, off_t off,
-                   int count, int *eof, void *data)
-{
-	int     len;
+static int systemp_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, systemp_proc_show, NULL);
+}
 
-        len=sprintf(page, "vendor\t\t: %s\n", VENDOR);
-        return len;
+static int vendor_proc_show(struct seq_file *m, void *v) {
+	seq_printf(m, "vendor\t\t: %s\n", VENDOR);
+	return 0;
+}
+
+static int vendor_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, vendor_proc_show, NULL);
 }
 
 /* It is because renice value is in range between (-)20~(+)20.
@@ -888,29 +902,24 @@ static int lnrext4_priority_smb = -15;
 static int lnrext3_priority_smb = 0;
 #endif
 
-static int priority_read(char *page, char **start, off_t off,
-                   int count, int *eof, void *data)
-{
-	int len = 0;
-    len = sprintf(page,	       "r5e4_pri_smb=%d\n", rd5ext4_priority_smb);
-    len += sprintf(page + len, "r5e3_pri_smb=%d\n", rd5ext3_priority_smb);
+static int priority_proc_show(struct seq_file *m, void *v) {
+	seq_printf(m, "r5e4_pri_smb=%d\n", rd5ext4_priority_smb);
+	seq_printf(m, "r5e3_pri_smb=%d\n", rd5ext3_priority_smb);
+	seq_printf(m, "r6e4_pri_smb=%d\n", rd6ext4_priority_smb);
+	seq_printf(m, "r6e3_pri_smb=%d\n", rd6ext3_priority_smb);
+	seq_printf(m, "r1e4_pri_smb=%d\n", rd1ext4_priority_smb);
+	seq_printf(m, "r1e3_pri_smb=%d\n", rd1ext3_priority_smb);
+	seq_printf(m, "r0e4_pri_smb=%d\n", rd0ext4_priority_smb);
+	seq_printf(m, "r0e3_pri_smb=%d\n", rd0ext3_priority_smb);
+	seq_printf(m, "r-1e4_pri_smb=%d\n", lnrext4_priority_smb);
+	seq_printf(m, "r-1e3_pri_smb=%d\n", lnrext3_priority_smb);
+	seq_printf(m, "r-2e4_pri_smb=%d\n", sglext4_priority_smb);
+	seq_printf(m, "r-2e3_pri_smb=%d\n", sglext3_priority_smb);
+	return 0;
+}
 
-    len += sprintf(page + len, "r6e4_pri_smb=%d\n", rd6ext4_priority_smb);
-    len += sprintf(page + len, "r6e3_pri_smb=%d\n", rd6ext3_priority_smb);
-
-    len += sprintf(page + len, "r1e4_pri_smb=%d\n", rd1ext4_priority_smb);
-    len += sprintf(page + len, "r1e3_pri_smb=%d\n", rd1ext3_priority_smb);
-
-    len += sprintf(page + len, "r0e4_pri_smb=%d\n", rd0ext4_priority_smb);
-    len += sprintf(page + len, "r0e3_pri_smb=%d\n", rd0ext3_priority_smb);
-
-    len += sprintf(page + len, "r-1e4_pri_smb=%d\n", lnrext4_priority_smb);
-    len += sprintf(page + len, "r-1e3_pri_smb=%d\n", lnrext3_priority_smb);
-	
-    len += sprintf(page + len, "r-2e4_pri_smb=%d\n", sglext4_priority_smb);
-    len += sprintf(page + len, "r-2e3_pri_smb=%d\n", sglext3_priority_smb);
-
-	return len;
+static int priority_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, priority_proc_show, NULL);
 }
 
 enum {
@@ -1007,158 +1016,138 @@ leave_unknown:
 	return 0;
 }
 
-static int priority_write(struct file *file, const char __user *buffer,
-			   unsigned long count, void *data)
-{
+static ssize_t priority_proc_write(struct file* file, const char __user *buffer, size_t count, loff_t *f_pos) {
 	int size = count;
-	char *pricmd = NULL;
+	char *tmp = kmalloc(1024, GFP_KERNEL);
+	if (!tmp) return -ENOMEM;
+	memset(tmp, 0, 1024);
 
-	pricmd = kmalloc(1024, GFP_KERNEL);
+	if ( count > 1024 ) size = 1024;
 
-	if(!pricmd)
-		return -ENOMEM;
-
-	memset(pricmd, 0, 1024);
-
-	if(count > 1024)
-		size = 1024;
-
-	if(copy_from_user(pricmd, buffer, size)) {
+	if (copy_from_user(tmp, buffer, size)) {
+		kfree(tmp);
 		count = -EFAULT;
-		goto leave;
+		return count;
 	}
 
-	if(!pricmd[0]) 
-		goto leave;	
-	
-	pricmd[strlen(pricmd)-1] = 0;
-
-	if(!priority_parse(pricmd)) { 
-		printk("Parse command (%s) error ...\n", pricmd);
-		count =  -EINVAL;
-		goto leave;
+	if (!tmp[0]) {
+		kfree(tmp);
+		return count;
 	}
 
-leave:
+	tmp[strlen(tmp) - 1] = 0;
+	if (!priority_parse(tmp)) {		
+		printk("Parse command (%s) error ...\n", tmp);
+		kfree(tmp);
+		count = -EINVAL;
+		return count;
+	}
 
-	if(pricmd)
-		kfree(pricmd);	
+	if (tmp) kfree(tmp);
+	return count;
 
+}
+
+// adjust ata retry parameters START
+
+static int ata_reset_proc_show(struct seq_file *m, void *v) {
+	seq_printf(m, "%d\n", qnap_ata_reset_to_ms);
+	return 0;
+}
+
+static int ata_reset_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, ata_reset_proc_show, NULL);
+}
+
+static ssize_t ata_reset_proc_write(struct file* file, const char __user *buffer, size_t count, loff_t *f_pos) {
+	char data_buf[16] = {'\0'};
+	if ( copy_from_user(data_buf, buffer, count)) return -EFAULT;
+	data_buf[count] = 0;
+	qnap_ata_reset_to_ms = simple_strtoul(data_buf, NULL, 0);
 	return count;
 }
 
-
-// adjust ata retry parameters START
-static int ata_reset_timeout_read(char *page, char **start, off_t off,int count, int *eof, void *data)
-{
-	int len;
-	len=sprintf(page, "%d\n", qnap_ata_reset_to_ms);
-	return len;
+static int ata_retry_proc_show(struct seq_file *m, void *v) {
+	seq_printf(m, "%d\n", qnap_ata_retry_val);
+	return 0;
 }
 
-static int ata_reset_timeout_write(struct file *file,const char __user *buffer,unsigned long count,void *data)
-{		
+static int ata_retry_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, ata_retry_proc_show, NULL);
+}
+
+static ssize_t ata_retry_proc_write(struct file *file, const char __user *buffer, size_t count, loff_t *f_pos) {
         char data_buf[16] = {'\0'};
-        if(copy_from_user(data_buf,buffer,count))
-                return -EFAULT;
-        data_buf[count] = 0;
-        qnap_ata_reset_to_ms = simple_strtoul(data_buf,NULL,0);
-        return count;
-}
-
-
-static int ata_retry_read(char *page, char **start, off_t off,int count, int *eof, void *data)
-{
-	int len;	
-	len=sprintf(page, "%d\n", qnap_ata_retry_val);
-	return len;
-}
-
-static int ata_retry_write(struct file *file,const char __user *buffer,unsigned long count,void *data)
-{
-        char data_buf[16] = {'\0'};
-        if(copy_from_user(data_buf,buffer,count))
-                return -EFAULT;
+        if ( copy_from_user(data_buf,buffer,count)) return -EFAULT;
         data_buf[count] = 0;
         qnap_ata_retry_val = simple_strtoul(data_buf,NULL,0);
         return count;
 }
 // End of adjust ata retry parameters END
 
+static const struct file_operations ata_time_proc_fops = {
+	.open		= ata_reset_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.write		= ata_reset_proc_write,
+	.release	= single_release,
+};
+
+static const struct file_operations ata_retry_proc_fops = {
+	.open		= ata_retry_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.write		= ata_retry_proc_write,
+	.release	= single_release,
+};
+
+static const struct file_operations systemp_proc_fops = {
+	.open		= systemp_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
+static const struct file_operations vendor_proc_fops = {
+	.open		= vendor_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
+static const struct file_operations priority_proc_fops = {
+	.open		= priority_proc_open,
+	.read		= seq_read,
+	.write		= priority_proc_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 static void tsinfo_create_proc(void)
 {
+
 	tsinfo_procdir = proc_mkdir("tsinfo", NULL);
-	systemp_procdir = create_proc_entry("tsinfo/systemp", 0644, NULL );
-	vendor_procdir = create_proc_entry("tsinfo/vendor", 0644, NULL );
-	priority_procdir = create_proc_entry("tsinfo/priority", 0644, NULL );
 
-	ata_time_procdir = create_proc_entry("tsinfo/ata_reset_to_ms", 0644, NULL );
-	ata_retry_procdir = create_proc_entry("tsinfo/ata_retry", 0644, NULL );
+	ata_time_procdir = proc_create("tsinfo/ata_reset_to_ms", 0644, NULL, &ata_time_proc_fops);
+	if (!ata_time_procdir) printk("tsinfo: Couldn't create proc ata_time\n");
+	else printk("tsinfo: create proc ata_time succesfully\n");
 
+	ata_retry_procdir = proc_create("tsinfo/ata_retry", 0644, NULL, &ata_retry_proc_fops);
+	if (!ata_retry_procdir) printk("tsinfo: Couldn't create proc ata_retry\n");
+	else printk("tsinfo: create proc ata_retry succesfully\n");
 
-	if(ata_time_procdir == NULL)
-		printk("tsinfo: Couldn't create proc ata_time\n");
-	else{
-		ata_time_procdir->read_proc = ata_reset_timeout_read;
-		ata_time_procdir->write_proc = ata_reset_timeout_write;
-		printk("tsinfo: create proc ata_time successfully\n");
-	}
+	systemp_procdir = proc_create("tsinfo/systemp", 0644, NULL, &systemp_proc_fops);
+	if (!systemp_procdir) printk("tsinfo: Couldn't create proc systemp\n");
+	else printk("tsinfo: create proc systemp succesfully\n");
 
-	if(ata_retry_procdir == NULL)
-		printk("tsinfo: Couldn't create proc ata_retry\n");
-	else{
-		ata_retry_procdir->read_proc = ata_retry_read;
-		ata_retry_procdir->write_proc = ata_retry_write;
-		printk("tsinfo: create proc ata_retry successfully\n");
-	}
+	vendor_procdir = proc_create("tsinfo/vendor", 0644, NULL, &vendor_proc_fops);
+	if (!vendor_procdir) printk("tsinfo: Coudln't create proc vendor\n");
+	else printk("tsinfo: create proc cendor succesfully\n");
 
+	priority_procdir = proc_create("tsinfo/priority", 0644, NULL, &priority_proc_fops);
+	if (!priority_procdir) printk("tsinfo: Couldn't create proc priority\n");
+	else printk("tsinfo: create proc priority succesfully\n");
 
-
-	if(systemp_procdir == NULL)
-		printk("tsinfo: Couldn't create proc systemp\n");
-	else{
-		systemp_procdir->read_proc = systemp_read;
-		printk("tsinfo: create proc systemp successfully\n");
-	}
-	if(vendor_procdir == NULL)
-		printk("tsinfo: Couldn't create proc verder\n");
-	else{
-		vendor_procdir->read_proc = vendor_read;
-		printk("tsinfo: create proc systemp successfully\n");
-	}
-	if(priority_procdir == NULL)
-		printk("tsinfo: Couldn't create proc priority\n");
-	else {
-		priority_procdir->read_proc = priority_read;
-		priority_procdir->write_proc = priority_write;
-		printk("tsinfo: create proc priority successfully\n");
-	}
-}
-static int power_read(char *page,
-		       char **start, off_t off, int count, int *eof, void *data)
-{
-    char *p = page;
-    int size = 0;
-    unsigned int state;;
-    if (off != 0)
-        goto end;
-
-    state = get_power_state();
-
-    p += sprintf(p,"%x\n",state);
-
-end:
-    size = (p - page);
-    if (size <= off + count)
-    	*eof = 1;
-    *start = page + off;
-    size -= off;
-    if (size > count)
-    	size = count;
-    if (size < 0)
-    	size = 0;
-    return size;
 }
 
 /*
@@ -1193,114 +1182,95 @@ static struct pci_driver mv_pci_driver = {
 //add a proc interface to active which ports can modify socket receive buffer dynamically.
 #include <linux/ctype.h>
 #define MAX_ACTIVE_PORT_NUM 30
+
 int active_port[MAX_ACTIVE_PORT_NUM];
 int active_port_num=0;
-static int
-sk_rcv_port_read(char *page,
-		       char **start, off_t off, int count, int *eof, void *data)
-{
-    char *p = page;
-    int size = 0;
-    unsigned int i;
-    if (off != 0)
-        goto end;
 
-    p += sprintf(p, "active port:");
-
-
-    for(i=0;i<active_port_num;i++){
-        p += sprintf(p,"%d ",active_port[i]);
-    }
-    p += sprintf(p,"\n");
-
-end:
-    size = (p - page);
-    if (size <= off + count)
-    	*eof = 1;
-    *start = page + off;
-    size -= off;
-    if (size > count)
-    	size = count;
-    if (size < 0)
-    	size = 0;
-    return size;
+static int sk_rcv_port_proc_show(struct seq_file *m, void *v) {
+	int i = 0;
+	seq_printf(m, "active port:");
+	for (i = 0; i < active_port_num; i++) {
+		seq_printf(m, "%d ", active_port[i]);
+	}
+	seq_printf(m, "\n");
+	return 0;
 }
 
-static int
-sk_rcv_port_write(struct file *file,
-			const char __user * buffer,
-			unsigned long count, void *data)
-{
+static int sk_rcv_port_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, sk_rcv_port_proc_show, NULL);
+}
+
+static ssize_t sk_rcv_port_proc_write(struct file *file, const char __user *buffer, unsigned long count, loff_t *f_pos) {
+
     char data_buf[256] = {'\0'};
     char *buffer_ptr[MAX_ACTIVE_PORT_NUM+1];
-    int i=0,index=0;
+    int i=0, index=0;
+
     //count include last character
     if (count > sizeof(data_buf) - 1)
         return -EINVAL;
 
     if (copy_from_user(data_buf, buffer, count))
         return -EFAULT;
-
     
     data_buf[count] = 0;
     memset(buffer_ptr,0,sizeof(char *) * (MAX_ACTIVE_PORT_NUM + 1));
-    while(i < count){
-        while(!isalnum(data_buf[i]) && i < count){
+
+    while (i < count) {
+        while (!isalnum(data_buf[i]) && i < count) {
             i++;
         }
-        if(i == count)
-            break;
+        if (i == count) break;
         buffer_ptr[index] = &data_buf[i];
-        while(isalnum(data_buf[i]) && i < count){
+        while (isalnum(data_buf[i]) && i < count) {
             i++;
         }
         data_buf[i++]=0;
         index++;
-        if(index >= (MAX_ACTIVE_PORT_NUM + 1))
-            break;
+        if(index >= (MAX_ACTIVE_PORT_NUM + 1)) break;
     }
-    if(index == 0)
-    	return count;
-	
-    if(!strcmp(buffer_ptr[0],"set")){
+
+    if (index == 0) return count;
+
+    if (!strcmp(buffer_ptr[0],"set")) {
 	memset(active_port,0,sizeof(int) * MAX_ACTIVE_PORT_NUM);
 	active_port_num = 0;
-        for(i=0;i<index-1;i++){
+        for (i = 0; i < index-1; i++) {
             active_port[active_port_num] = simple_strtoul(buffer_ptr[i+1],NULL,0);
             if(active_port[active_port_num] != 0 && 
 		active_port[active_port_num] < 65535)
                 active_port_num++;
 	}
     }
-    else if(!strcmp(buffer_ptr[0],"add")){
-        for(i=0;i<index-1;i++){
+    else if (!strcmp(buffer_ptr[0],"add")) {
+        for (i = 0; i < index-1; i++) {
 	    int port_add;
             port_add = simple_strtoul(buffer_ptr[i+1],NULL,0);
-	    if(port_add != 0 && port_add < 65535){
+	    if (port_add != 0 && port_add < 65535) {
 		int j,abort=0;
-		for(j=0;j<active_port_num;j++){
-        	    if(port_add == active_port[j]){
+		for (j = 0; j < active_port_num; j++) {
+        	    if (port_add == active_port[j]) {
 		    	abort = 1;
 			break;
 	 	    }
 		}
-		if(abort == 0 && active_port_num < MAX_ACTIVE_PORT_NUM)
+		if (abort == 0 && active_port_num < MAX_ACTIVE_PORT_NUM)
 			active_port[active_port_num++] = port_add;
 	    }
 	}
     }
-    else if(!strcmp(buffer_ptr[0],"del")){
+    else if (!strcmp(buffer_ptr[0], "del")) {
 	int tmp_active_port[MAX_ACTIVE_PORT_NUM];
 	int tmp_active_port_num;
 	memcpy(tmp_active_port,active_port,sizeof(int) * MAX_ACTIVE_PORT_NUM);
 	tmp_active_port_num = active_port_num;
-        for(i=0;i<index-1;i++){
+        for( i = 0; i < index-1; i++) {
 	    int port_del;
             port_del = simple_strtoul(buffer_ptr[i+1],NULL,0);
-	    if(port_del != 0 && port_del < 65535){
+	    if (port_del != 0 && port_del < 65535) {
 		int j;
-		for(j=0;j<tmp_active_port_num;j++){
-        	    if(port_del == tmp_active_port[j]){
+		for ( j = 0; j < tmp_active_port_num; j++) {
+        	    if (port_del == tmp_active_port[j]) {
 			tmp_active_port[j] = 0;
 	 	    }
 		}
@@ -1308,37 +1278,61 @@ sk_rcv_port_write(struct file *file,
 	}
 	memset(active_port,0,sizeof(int) * MAX_ACTIVE_PORT_NUM);
 	active_port_num = 0;
-	for(i=0;i<tmp_active_port_num;i++){
-	    if(tmp_active_port[i] != 0){
+	for(i = 0; i < tmp_active_port_num; i++){
+	    if (tmp_active_port[i] != 0) {
 		active_port[active_port_num++] = tmp_active_port[i];
 	    }
 	}
     }
-//    for(i=0;i<active_port_num;i++)
+//    for(i = 0; i < active_port_num; i++)
 //             printk("active port %d :%d\n",i,active_port[i]);
        
     return count;
 }
 
+static struct file_operations sk_rcv_port_proc_fops = {
+	.open		= sk_rcv_port_proc_open,
+	.read		= seq_read,
+	.write		= sk_rcv_port_proc_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 int sk_rcv_port_proc_init()
 {
-	struct proc_dir_entry *entry=NULL;
-	entry=create_proc_read_entry("tsinfo/sk_rcv_port", 0,NULL, sk_rcv_port_read,(void *)0);
-	if (entry)
-		entry->write_proc = sk_rcv_port_write;
+	struct proc_dir_entry *entry;
+	entry = proc_create("tsinfo/sk_rcv_port", 0, NULL, &sk_rcv_port_proc_fops);
 	return 0;
 }
 
 int sk_rcv_port_proc_exit()
 {
-	remove_proc_entry("tsinfo/sk_rcv_port",NULL);
+	remove_proc_entry("tsinfo/sk_rcv_port", NULL);
 	return 0;
 }
 
+static int power_proc_show(struct seq_file *m, void *v) {
+	unsigned int state;
+	state = get_power_state();
+	seq_printf(m, "%x\n", state);
+	return 0;
+}
+
+static int power_proc_open(struct inode *inode, struct file *file) {
+	return single_open(file, power_proc_show, NULL);
+}
+
+static struct file_operations power_proc_fops = {
+	.open		= power_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
 int power_proc_init()
 {
-	struct proc_dir_entry *entry=NULL;
-	entry=create_proc_read_entry("tsinfo/power", 0,NULL, power_read,(void *)0);
+	struct proc_dir_entry *entry;
+	entry = proc_create("tsinfo/power", 0, NULL, &power_proc_fops);
 	return 0;
 }
 
@@ -1366,7 +1360,7 @@ static __init int qnap_init(void)
 		//Add for system temperature and system vendor
 		tsinfo_create_proc();
 		sk_rcv_port_proc_init();
-        power_proc_init();
+		power_proc_init();
 		// Get mv6145 pci device
 		for_each_pci_dev(pcidev){
 			pci_read_config_word(pcidev, PCI_VENDOR_ID, &pcidev->vendor);
