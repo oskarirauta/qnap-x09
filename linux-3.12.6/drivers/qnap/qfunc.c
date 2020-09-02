@@ -44,6 +44,7 @@ int IsFull(struct objQueue *q)
         else
                 return 0;
 }
+EXPORT_SYMBOL(IsFull);
 
 void show_queue_obj(struct objQueue q)
 {
@@ -53,6 +54,7 @@ void show_queue_obj(struct objQueue q)
                 printk("[%d] = %s\n", i, q.data[i]);
         }
 }
+EXPORT_SYMBOL(show_queue_obj);
 
 int put_to_queue( struct objQueue *q, const char *str, int state)
 {
@@ -84,6 +86,7 @@ int put_to_queue( struct objQueue *q, const char *str, int state)
 
     return 0;
 }
+EXPORT_SYMBOL(put_to_queue);
 
 int IsEmpty(struct objQueue *q){
         if(q->queue_start == q->queue_end){
@@ -93,6 +96,7 @@ int IsEmpty(struct objQueue *q){
         else
                 return 0;
 }
+EXPORT_SYMBOL(IsEmpty);
 
 int get_from_queue(struct objQueue *q, File_Name *s){
         unsigned long flag;
@@ -120,7 +124,7 @@ int get_from_queue(struct objQueue *q, File_Name *s){
 error:
         return 0;
 }
-
+EXPORT_SYMBOL(get_from_queue);
 
 /* PATCH: Review QRAID1, 
 	Since we have sys_getcwd(), 
@@ -230,6 +234,7 @@ int is_word_temp(char *pathname)
                 else
                         return 1;
 }
+EXPORT_SYMBOL(is_word_temp);
 
 // PATCH: Review QRAID1
 char * get_full_name( const char * oldname )
@@ -274,6 +279,7 @@ char * get_full_name( const char * oldname )
 
 	return fullname;
 }
+EXPORT_SYMBOL(get_full_name);
 
 /* Check the file is in the /share */
 int is_in_share_folder(char *pathname)
@@ -292,6 +298,7 @@ int is_in_share_folder(char *pathname)
 	else
 		return 0;
 }
+EXPORT_SYMBOL(is_in_share_folder);
 
 int is_in_trash(char *pathname)
 {
@@ -314,6 +321,7 @@ int is_in_trash(char *pathname)
 	else
 		return 0;
 }
+EXPORT_SYMBOL(is_in_trash);
 
 int is_in_eSATA(char *pathname)
 {
@@ -322,6 +330,7 @@ int is_in_eSATA(char *pathname)
 	else
 		return 0;
 }
+EXPORT_SYMBOL(is_in_eSATA);
 
 int is_in_usb(char *pathname)
 {
@@ -330,6 +339,7 @@ int is_in_usb(char *pathname)
 	else
 		return 0;
 }
+EXPORT_SYMBOL(is_in_usb);
 
 // PATCH: Review QRAID1
 void changedfiles_log_filename( const char * oldname, const char * newname, const int operation) 
@@ -492,9 +502,12 @@ int qnap_check_recycle(void)
 {
 	return recycle_enable;
 }
+EXPORT_SYMBOL(qnap_check_recycle);
 
 int qnap_check_qraid1(void)
 {
 	return qraid1_enable;
 }
+EXPORT_SYMBOL(qnap_check_qraid1);
+
 #endif
